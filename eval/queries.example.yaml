@@ -1,0 +1,10 @@
+# Copy to eval/queries.yaml and fill with ~20 real recall questions —
+# the kind you'd actually ask mid-play. `expect` is an optional substring
+# that should appear in a correct hit (used for scoring).
+
+- query: "what did Mott say about the registry"
+  expect: "registry"
+
+- query: "where did the spare stimpaks end up"
+
+- query: "who saw the player leave the columbarium"
