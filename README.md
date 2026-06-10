@@ -49,6 +49,40 @@ holystone eval --project vault49
 
 PDF exports: convert first (`pdftotext -layout session.pdf session.txt`), then strip.
 
+## Use it live: recall inside a Claude Project
+
+The point of the index isn't to read it yourself — it's for the narrator to reach during play, so a character's voice and the facts of record come from the actual log instead of a drifting memory of it. `holystone-mcp` exposes recall as an MCP server with three tools:
+
+| Tool | For |
+|---|---|
+| `recall(query, project)` | semantic + lexical — "find the scene about X", or re-ground a character's voice on their real past lines before writing them |
+| `find_quote(phrase, project)` | full-text only — the precise instrument for an exact quote or a proper noun ("what did she call her brother") |
+| `list_sessions(project)` | what's indexed, with in-fiction date ranges |
+
+Because the corpus is the **repaired** log, the lines it returns are verbatim — so grounding on them pulls voice toward the record, never toward paraphrase.
+
+**Local — Claude Desktop / Claude Code (stdio, zero deployment):**
+
+```bash
+pip install -e .[mcp]
+# Claude Code:
+claude mcp add holystone -- holystone-mcp
+# Claude Desktop: add to claude_desktop_config.json ->
+#   "mcpServers": { "holystone": { "command": "holystone-mcp" } }
+```
+
+**Remote — claude.ai custom connector (needs a public HTTPS URL):**
+
+```bash
+holystone-mcp --http --host 0.0.0.0 --port 8000
+# expose :8000 over HTTPS (a tunnel like cloudflared, or a deploy), then add
+# that URL as a custom connector in the Project's settings.
+```
+
+> ⚠️ **Security.** The HTTP endpoint queries your database and returns your logs. Never expose it unauthenticated — put it behind a tunnel/proxy that enforces auth, or stick to local stdio. It reads `OPENROUTER_API_KEY` and `DATABASE_URL` from the environment / `.env` like the rest of holystone.
+
+A recall tool the narrator never calls is dead weight: post-hoc grounding (between sessions) is more reliable than hoping for an in-play call, so lean on it there first.
+
 ## Environment
 
 | Variable | Purpose |

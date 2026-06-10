@@ -63,15 +63,31 @@ def _print_results(title: str, results: list[dict], preview: int = 320) -> None:
         print(f"    {snippet}...")
 
 
-def recall(query: str, project_id: str, k: int = 5) -> None:
-    client = OpenRouter()
-    qvec = client.embed([query], model=_embed_model(), input_type="query")[0]
+def search(
+    query: str,
+    project_id: str,
+    k: int = 5,
+    semantic: bool = True,
+    lexical: bool = True,
+) -> dict:
+    """Run vector and/or full-text recall and return the hits — no printing.
+    Shared by the CLI `recall` command and the MCP server."""
+    result: dict = {"vector": [], "fts": []}
     with db.connect() as conn:
-        vec_hits = db.vector_search(conn, project_id, qvec, k=k)
-        fts_hits = db.fts_search(conn, project_id, query, k=k)
+        if lexical:
+            result["fts"] = db.fts_search(conn, project_id, query, k=k)
+        if semantic:
+            client = OpenRouter()
+            qvec = client.embed([query], model=_embed_model(), input_type="query")[0]
+            result["vector"] = db.vector_search(conn, project_id, qvec, k=k)
+    return result
+
+
+def recall(query: str, project_id: str, k: int = 5) -> None:
+    data = search(query, project_id, k=k)
     print(f"\n[recall] {query!r} in project '{project_id}'")
-    _print_results("vector", vec_hits)
-    _print_results("full-text", fts_hits)
+    _print_results("vector", data["vector"])
+    _print_results("full-text", data["fts"])
 
 
 def run_eval(project_id: str, queries_path: Path, k: int = 5) -> None:

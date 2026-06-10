@@ -81,7 +81,7 @@ def upsert_chunks(
 
 def fts_search(conn: psycopg.Connection, project_id: str, query: str, k: int = 5) -> list[dict]:
     rows = conn.execute(
-        """select session_label, chunk_index, content,
+        """select session_label, chunk_index, content, in_fiction_date,
                   ts_rank(content_tsv, websearch_to_tsquery('english', %s)) as score
            from hs_chunks
            where project_id = %s
@@ -91,14 +91,15 @@ def fts_search(conn: psycopg.Connection, project_id: str, query: str, k: int = 5
         (query, project_id, query, k),
     ).fetchall()
     return [
-        {"session": r[0], "chunk": r[1], "content": r[2], "score": float(r[3])}
+        {"session": r[0], "chunk": r[1], "content": r[2],
+         "in_fiction_date": r[3], "score": float(r[4])}
         for r in rows
     ]
 
 
 def vector_search(conn: psycopg.Connection, project_id: str, vec: list[float], k: int = 5) -> list[dict]:
     rows = conn.execute(
-        """select session_label, chunk_index, content,
+        """select session_label, chunk_index, content, in_fiction_date,
                   embedding <=> %s::vector as distance
            from hs_chunks
            where project_id = %s and embedding is not null
@@ -107,6 +108,23 @@ def vector_search(conn: psycopg.Connection, project_id: str, vec: list[float], k
         (_vec_literal(vec), project_id, k),
     ).fetchall()
     return [
-        {"session": r[0], "chunk": r[1], "content": r[2], "score": float(r[3])}
+        {"session": r[0], "chunk": r[1], "content": r[2],
+         "in_fiction_date": r[3], "score": float(r[4])}
+        for r in rows
+    ]
+
+
+def list_sessions(conn: psycopg.Connection, project_id: str) -> list[dict]:
+    rows = conn.execute(
+        """select session_label, count(*),
+                  min(in_fiction_date), max(in_fiction_date)
+           from hs_chunks
+           where project_id = %s
+           group by session_label
+           order by session_label""",
+        (project_id,),
+    ).fetchall()
+    return [
+        {"session": r[0], "chunks": r[1], "date_from": r[2], "date_to": r[3]}
         for r in rows
     ]
