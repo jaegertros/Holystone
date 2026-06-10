@@ -1,10 +1,23 @@
 """Deterministic cleanup pass. No model involved.
 
-Raw chat export in, readable transcript out. Dialogue passes through
-character-for-character; everything removed is mechanical noise:
-exporter page artifacts, OOC blocks, tracker mirror lines, duplicate
-regenerated paragraphs. Quotes are normalized once here so every
-downstream stage (condense, verify, embed) sees one canonical text.
+Raw chat export in, readable transcript out. Dialogue and narration pass
+through character-for-character; everything removed is mechanical noise.
+Quotes are normalized once here so every downstream stage (condense,
+verify, embed) sees one canonical text.
+
+Two export shapes are auto-detected:
+
+  AI Exporter  - "Exported with AI Exporter", "You Asked", "Claude" markers.
+                 OOC blocks and full-bracket meta lines are stripped.
+  claude.ai    - "# you asked" / "# claude response" markers, "▼ <date>"
+                 scene headers, [Tracker:]/[Inventory:] readouts, [[OOC]]
+                 correction history. Here trackers compress to date+place,
+                 inventory is dropped, and [[OOC]] / *[Narrator note]*
+                 blocks are KEPT — they are the deliberate-meta record, not
+                 noise. (Ported from the marauders_clean.py heuristics.)
+
+Both shapes funnel through one collapse+dedup tail and emit holystone's
+canonical [PLAYER] / [NARRATOR] turn markers.
 """
 
 from __future__ import annotations
@@ -14,23 +27,34 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# --- line patterns -----------------------------------------------------------
+# --- AI Exporter line patterns ----------------------------------------------
 
 EXPORTER_PAGE = re.compile(r"^Exported with AI Exporter\s+\d+\s*/\s*\d+\s*$")
 PLAYER_MARK = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+You Asked\s*$")
 NARRATOR_MARK = re.compile(r"^Claude\s*$")
 FULL_BRACKET = re.compile(r"^\s*\[[^\[\]]*\]\s*$")  # whole line is one [ ... ]
 OOC_OPEN = re.compile(r"^\s*\[\s*OOC\b", re.IGNORECASE)
-HRULE = re.compile(r"^\s*(?:-{3,}|_{3,}|\*{3,})\s*$")
+
+# --- claude.ai export line patterns -----------------------------------------
+
+CLAUDE_USER_HDR = re.compile(r"^#\s+you asked\s*$", re.IGNORECASE)
+CLAUDE_RESP_HDR = re.compile(r"^#\s+claude response\s*$", re.IGNORECASE)
+CLAUDE_FROM = re.compile(r"^>\s*From:")
+SCENE_HEADER = re.compile(r"^\s*▼")
+TRACKER = re.compile(r"^\s*\[Tracker:", re.IGNORECASE)
+INVENTORY = re.compile(r"^\s*\[Inventory:", re.IGNORECASE)
+FOOTER = "*Type /? for commands.*"
+BAIL = "I've lost the thread on this"  # substring of the canned bail message
+NOCONTENT = "*(No content)*"
 
 # Curly quotes and NBSP normalize to ASCII so verbatim matching is stable
 # across export tools. Em-dashes and ellipses are prose; they stay.
 QUOTE_MAP = {
-    "\u201c": '"',
-    "\u201d": '"',
-    "\u2018": "'",
-    "\u2019": "'",
-    "\u00a0": " ",
+    "“": '"',
+    "”": '"',
+    "‘": "'",
+    "’": "'",
+    " ": " ",
 }
 
 
@@ -49,6 +73,11 @@ class StripStats:
         "exporter": 0,
         "ooc": 0,
         "bracket": 0,
+        "inventory": 0,
+        "tracker_compressed": 0,
+        "footer": 0,
+        "preamble": 0,
+        "empty_turns": 0,
         "duplicate_paragraphs": 0,
     })
 
@@ -60,15 +89,21 @@ class StripStats:
         return " | ".join(parts)
 
 
-def strip_text(
-    raw: str,
-    keep_ooc: bool = False,
-    keep_brackets: bool = False,
-) -> tuple[str, StripStats]:
-    text = normalize_text(raw)
-    lines = text.splitlines()
-    stats = StripStats(lines_in=len(lines))
+def _is_claudeai_export(text: str) -> bool:
+    return bool(
+        re.search(r"^#\s+claude response\s*$", text, re.MULTILINE | re.IGNORECASE)
+        or re.search(r"^#\s+you asked\s*$", text, re.MULTILINE | re.IGNORECASE)
+    )
 
+
+# --- AI Exporter shape -------------------------------------------------------
+
+def _strip_ai_exporter(
+    lines: list[str],
+    stats: StripStats,
+    keep_ooc: bool,
+    keep_brackets: bool,
+) -> list[str]:
     out_lines: list[str] = []
     export_mode = False  # only honor bare "Claude" turn markers in export-shaped files
     i = 0
@@ -115,6 +150,197 @@ def strip_text(
 
         out_lines.append(line.rstrip())
         i += 1
+
+    return out_lines
+
+
+# --- claude.ai shape ---------------------------------------------------------
+
+def _trim(seq: list[str]) -> list[str]:
+    seq = list(seq)
+    while seq and not seq[0].strip():
+        seq.pop(0)
+    while seq and not seq[-1].strip():
+        seq.pop()
+    return seq
+
+
+def _compress_tracker(line: str) -> str:
+    """[Tracker: <date/time> | <place> | <drift-prone summary...>]
+       -> [Tracker: <date/time> | <place>]
+
+    Keeps the when/where (scene metadata that aids condense + recall),
+    drops the self-summarized "what happened" — that's what the prose
+    above the line already is, and it's the part that drifts.
+    """
+    body = line.strip()[len("[Tracker:"):]
+    if body.endswith("]"):
+        body = body[:-1]
+    fields = [f.strip() for f in body.split("|")]
+    keep = [f for f in fields[:2] if f]
+    return "[Tracker: " + " | ".join(keep) + "]"
+
+
+def _keep_only_bracketed(body: list[str], stats: StripStats) -> list[str]:
+    """A narrator turn with no scene header is preamble/planning chatter.
+    Keep only its [[OOC]] and *[Narrator note]* blocks; drop the rest."""
+    out: list[str] = []
+    in_ooc = in_note = False
+    for line in body:
+        s = line.strip()
+        if in_ooc:
+            out.append(line)
+            if "]]" in s:
+                in_ooc = False
+            continue
+        if in_note:
+            out.append(line)
+            if "]*" in s:
+                in_note = False
+            continue
+        if s.startswith("[["):
+            out.append(line)
+            if "]]" not in s[2:]:
+                in_ooc = True
+            continue
+        if s.startswith("*[Narrator note"):
+            out.append(line)
+            if "]*" not in s:
+                in_note = True
+            continue
+        stats.removed["preamble"] += 1
+    return out
+
+
+def _process_response(body: list[str], stats: StripStats) -> list[str]:
+    """Clean a single '# claude response' block (claude.ai shape)."""
+    has_scene = any(SCENE_HEADER.match(l) for l in body)
+    if not has_scene:
+        return _keep_only_bracketed(body, stats)
+
+    out: list[str] = []
+    in_ooc = in_note = False
+    scene_started = False
+    for line in body:
+        s = line.strip()
+        if in_ooc:
+            out.append(line)
+            if "]]" in s:
+                in_ooc = False
+            continue
+        if in_note:
+            out.append(line)
+            if "]*" in s:
+                in_note = False
+            continue
+        if s.startswith("[["):
+            out.append(line)
+            scene_started = True  # an OOC block ends the preamble zone
+            if "]]" not in s[2:]:
+                in_ooc = True
+            continue
+        if s.startswith("*[Narrator note"):
+            out.append(line)
+            scene_started = True
+            if "]*" not in s:
+                in_note = True
+            continue
+        if SCENE_HEADER.match(s):
+            scene_started = True
+            out.append(line.rstrip())
+            continue
+        if not scene_started:
+            if s:
+                stats.removed["preamble"] += 1
+            continue  # drop tool-preamble + planning before the scene opens
+        # --- inside the scene ---
+        if s == "---":
+            continue
+        if INVENTORY.match(s):
+            stats.removed["inventory"] += 1
+            continue
+        if TRACKER.match(s):
+            out.append(_compress_tracker(s))
+            stats.removed["tracker_compressed"] += 1
+            continue
+        if s == FOOTER or s == NOCONTENT or (BAIL in s):
+            stats.removed["footer"] += 1
+            continue
+        out.append(line.rstrip())
+    return out
+
+
+def _strip_claudeai(
+    lines: list[str],
+    stats: StripStats,
+    keep_ooc: bool,
+    keep_brackets: bool,
+) -> list[str]:
+    # Partition into head / user / response blocks on the turn headers.
+    blocks: list[tuple[str, list[str]]] = []
+    cur_type, cur_body = "head", []
+    for line in lines:
+        s = line.strip()
+        if CLAUDE_USER_HDR.match(s):
+            blocks.append((cur_type, cur_body))
+            cur_type, cur_body = "user", []
+        elif CLAUDE_RESP_HDR.match(s):
+            blocks.append((cur_type, cur_body))
+            cur_type, cur_body = "resp", []
+        else:
+            cur_body.append(line)
+    blocks.append((cur_type, cur_body))
+
+    out: list[str] = []
+    for btype, body in blocks:
+        if btype == "head":
+            for l in body:
+                if CLAUDE_FROM.match(l.strip()):
+                    out.append(l.strip())
+            continue
+
+        if btype == "user":
+            ub = [l.rstrip() for l in body
+                  if l.strip() != FOOTER and l.strip() != "---"]
+            ub = _trim(ub)
+            if not any(x.strip() for x in ub):
+                stats.removed["empty_turns"] += 1
+                continue
+            out.append("")
+            out.append("[PLAYER]")
+            out.append("")
+            out.extend(ub)
+            continue
+
+        if btype == "resp":
+            rb = _trim(_process_response(body, stats))
+            if not any(x.strip() for x in rb):
+                stats.removed["empty_turns"] += 1
+                continue  # nothing of value survived; drop the turn
+            out.append("")
+            out.append("[NARRATOR]")
+            out.append("")
+            out.extend(rb)
+            continue
+
+    return out
+
+
+# --- shared entry point ------------------------------------------------------
+
+def strip_text(
+    raw: str,
+    keep_ooc: bool = False,
+    keep_brackets: bool = False,
+) -> tuple[str, StripStats]:
+    text = normalize_text(raw)
+    lines = text.splitlines()
+    stats = StripStats(lines_in=len(lines))
+
+    if _is_claudeai_export(text):
+        out_lines = _strip_claudeai(lines, stats, keep_ooc, keep_brackets)
+    else:
+        out_lines = _strip_ai_exporter(lines, stats, keep_ooc, keep_brackets)
 
     # Collapse 3+ blank lines to one, then dedupe consecutive identical
     # paragraphs (regeneration artifacts in exports).

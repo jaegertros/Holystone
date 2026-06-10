@@ -1,11 +1,21 @@
 """Fidelity checker for the condenser's extractive contract.
 
-Every dialogue line in the condensed output — the full attributed line,
-**Name:** "words" — must appear verbatim in the source, and kept lines
-must appear in source order. Whitespace is collapsed and quotes were
-already normalized by strip, so a mismatch means the model changed words,
-punctuation, case, or attribution. Exit code is nonzero on any violation,
-so this can gate a pipeline.
+The condenser is allowed to compress narration into beats, but dialogue
+it keeps must be copied, never paraphrased. The checkable invariant:
+every quoted span — the text inside a pair of double quotes — that
+appears in the condensed output must appear verbatim in the source, in
+source order. Whitespace is collapsed and quotes were already normalized
+by strip, so a mismatch means the model changed words, punctuation, or
+case inside a quote.
+
+Quoting on the span rather than on an attribution wrapper means this
+works for both transcript styles holystone handles: prose with embedded
+quotes (`"On the record, is it." Aisling came off the doorframe.`) and
+attributed lines (`**Mott:** "You took your time."`) — in both, the
+dialogue a reader wants to find again sits inside double quotes.
+
+Exit code is nonzero on any violation, so this can gate a pipeline. A
+condensation that fails verify is corrupted, not condensed.
 """
 
 from __future__ import annotations
@@ -18,15 +28,31 @@ from pathlib import Path
 
 from .strip import normalize_text
 
-DIALOGUE_LINE = re.compile(r"^\s*\*\*[^*\n]{1,60}:\*\*\s+\S.*$")
+# A quoted span: text between a pair of straight double quotes (strip
+# normalized curly quotes to these already). Non-greedy, single pair.
+QUOTE_SPAN = re.compile(r'"([^"]+)"')
+
+# Spans shorter than this, or with no letters/digits, are punctuation-only
+# fragments ("." "?!") whose verbatim match proves nothing and only adds
+# noise/false order-breaks. Skip them.
+MIN_QUOTE_CHARS = 3
+# A span longer than this is almost certainly a quote-pairing artifact from
+# an unbalanced quote in messy source, not a real line. Skip it.
+MAX_QUOTE_CHARS = 600
 
 
 def _collapse(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def extract_dialogue_lines(text: str) -> list[str]:
-    return [_collapse(line) for line in text.splitlines() if DIALOGUE_LINE.match(line)]
+def extract_quotes(text: str) -> list[str]:
+    collapsed = _collapse(normalize_text(text))
+    spans: list[str] = []
+    for m in QUOTE_SPAN.finditer(collapsed):
+        q = m.group(1).strip()
+        if MIN_QUOTE_CHARS <= len(q) <= MAX_QUOTE_CHARS and any(c.isalnum() for c in q):
+            spans.append(q)
+    return spans
 
 
 @dataclass
@@ -43,29 +69,29 @@ class VerifyResult:
 
 def verify_text(condensed: str, source: str) -> VerifyResult:
     source_norm = _collapse(normalize_text(source))
-    source_lines = extract_dialogue_lines(normalize_text(source))
-    condensed_lines = extract_dialogue_lines(normalize_text(condensed))
+    source_quotes = extract_quotes(source)
+    condensed_quotes = extract_quotes(condensed)
 
-    result = VerifyResult(total=len(condensed_lines))
+    result = VerifyResult(total=len(condensed_quotes))
     cursor = 0  # position in source_norm for the order check
 
-    for line in condensed_lines:
-        pos_anywhere = source_norm.find(line)
+    for quote in condensed_quotes:
+        pos_anywhere = source_norm.find(quote)
         if pos_anywhere == -1:
-            closest = difflib.get_close_matches(line, source_lines, n=1, cutoff=0.5)
+            closest = difflib.get_close_matches(quote, source_quotes, n=1, cutoff=0.5)
             result.violations.append({
-                "line": line,
+                "line": quote,
                 "closest_source": closest[0] if closest else None,
             })
             continue
 
         result.exact += 1
-        pos_in_order = source_norm.find(line, cursor)
+        pos_in_order = source_norm.find(quote, cursor)
         if pos_in_order == -1:
-            # Exists in source, but only before lines we've already matched.
-            result.order_breaks.append(line)
+            # Exists in source, but only before quotes we've already matched.
+            result.order_breaks.append(quote)
         else:
-            cursor = pos_in_order + len(line)
+            cursor = pos_in_order + len(quote)
 
     return result
 
@@ -83,18 +109,18 @@ def verify_files(condensed_path: Path, source_path: Path) -> int:
     result = verify_text(condensed, source)
 
     print(f"[verify] {condensed_path.name} against {source_path.name}")
-    print(f"[verify] dialogue lines kept: {result.total} | exact: {result.exact} "
+    print(f"[verify] quoted spans kept: {result.total} | exact: {result.exact} "
           f"| violations: {len(result.violations)} | order breaks: {len(result.order_breaks)}")
 
     for v in result.violations:
-        print(f"\n  ALTERED OR INVENTED:\n    {v['line']}")
-        print(f"  closest source line:\n{_show_diff(v['line'], v['closest_source'])}")
+        print(f"\n  ALTERED OR INVENTED:\n    \"{v['line']}\"")
+        print(f"  closest source quote:\n{_show_diff(v['line'], v['closest_source'])}")
 
     for line in result.order_breaks:
-        print(f"\n  OUT OF ORDER:\n    {line}")
+        print(f"\n  OUT OF ORDER:\n    \"{line}\"")
 
     if result.ok:
-        print("[verify] PASS — every kept line is a copied line, in order.")
+        print("[verify] PASS — every kept quote is a copied quote, in order.")
         return 0
     print("[verify] FAIL")
     return 1

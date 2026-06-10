@@ -15,9 +15,9 @@ raw export ──strip──▶ *.stripped.md ──condense──▶ *.condense
 
 ## Stages
 
-- **strip** — deterministic, no model, stdlib only. Removes exporter page artifacts, OOC blocks, tracker mirror lines, duplicate regenerated paragraphs; normalizes curly quotes once so every downstream stage sees one canonical text; marks `[PLAYER]` / `[NARRATOR]` turns in export-shaped files. Dialogue passes through untouched.
+- **strip** — deterministic, no model, stdlib only. Auto-detects the export shape: **AI Exporter** files (strips OOC + full-bracket meta) and **claude.ai** files (`# you asked` / `# claude response`, `▼` scene headers — compresses `[Tracker:]` to date+place, drops `[Inventory:]`, and *keeps* `[[OOC]]` / `*[Narrator note]*` as the deliberate-meta correction record). Both normalize curly quotes once so every downstream stage sees one canonical text, and both emit `[PLAYER]` / `[NARRATOR]` turn markers. Prose and dialogue pass through untouched.
 - **condense** — the extractive second-model pass. Beats compress; kept dialogue is copied character-for-character. The contract lives in `prompts/condenser.md`. Free chat models are safe for this job *because the contract is machine-checkable* — which is the next stage.
-- **verify** — every `**Name:** "line"` in the condensed output must string-match the source, in source order. Violations print with a diff against the closest source line. Nonzero exit on failure, so it can gate a pipeline. A condensation that fails verify is corrupted, not condensed.
+- **verify** — every double-quoted span in the condensed output must string-match the source, in source order. This works whether dialogue is embedded in prose (`"..." she said`) or attributed (`**Name:** "..."`) — the quotation marks are the verbatim promise either way. Violations print with a diff against the closest source quote. Nonzero exit on failure, so it can gate a pipeline. A condensation that fails verify is corrupted, not condensed.
 - **embed / recall / eval** — chunk at scene breaks, embed as `passage`, upsert; questions embed as `query`. `recall` and `eval` always show vector and full-text results side by side: the comparison is the point. pgvector earns a permanent slot only if it visibly beats FTS on your own query set.
 
 ## Quickstart
