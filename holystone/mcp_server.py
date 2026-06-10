@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -49,7 +50,12 @@ except ModuleNotFoundError as exc:  # pragma: no cover
         "or: pip install 'mcp>=1.2'"
     ) from exc
 
+# An MCP client may launch this server from any working directory, so the
+# cwd search alone can miss the .env. Fall back to the repo-root .env next to
+# the package (present for an editable install). load_dotenv won't override
+# vars already set, so the cwd/real environment still wins.
 load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 mcp = FastMCP("holystone")
 
