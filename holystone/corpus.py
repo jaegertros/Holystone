@@ -39,7 +39,8 @@ def embed_files(
     with db.connect() as conn:
         db.init_schema(conn)
         for path in paths:
-            label = session_label or path.stem.replace(".condensed", "").replace(".stripped", "")
+            label = session_label or (path.stem.replace(".condensed", "")
+                                       .replace(".repaired", "").replace(".stripped", ""))
             text = path.read_text(encoding="utf-8", errors="replace")
             chunks = split_chunks(text, max_chars=chunk_chars)
             print(f"[embed] {path.name}: {len(chunks)} chunks as '{project_id}/{label}'")

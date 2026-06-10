@@ -63,7 +63,13 @@ class VerifyResult:
     order_breaks: list[str] = field(default_factory=list)
 
     @property
+    def content_ok(self) -> bool:
+        """The hard guarantee: every kept quote is a copied quote."""
+        return not self.violations
+
+    @property
     def ok(self) -> bool:
+        """Fully clean: verbatim AND in source order."""
         return not self.violations and not self.order_breaks
 
 
@@ -103,7 +109,7 @@ def _show_diff(line: str, closest: str | None) -> str:
     return "\n".join(f"    {d}" for d in diff)
 
 
-def verify_files(condensed_path: Path, source_path: Path) -> int:
+def verify_files(condensed_path: Path, source_path: Path, strict: bool = False) -> int:
     condensed = condensed_path.read_text(encoding="utf-8", errors="replace")
     source = source_path.read_text(encoding="utf-8", errors="replace")
     result = verify_text(condensed, source)
@@ -116,14 +122,24 @@ def verify_files(condensed_path: Path, source_path: Path) -> int:
         print(f"\n  ALTERED OR INVENTED:\n    \"{v['line']}\"")
         print(f"  closest source quote:\n{_show_diff(v['line'], v['closest_source'])}")
 
+    label = "OUT OF ORDER" if strict else "OUT OF ORDER (warning)"
     for line in result.order_breaks:
-        print(f"\n  OUT OF ORDER:\n    \"{line}\"")
+        print(f"\n  {label}:\n    \"{line}\"")
 
-    if result.ok:
-        print("[verify] PASS — every kept quote is a copied quote, in order.")
+    # The hard gate is content fidelity. Local reordering is a softer signal
+    # — harmless for recall, and not corruption — so it only fails in --strict.
+    if not result.content_ok:
+        print("[verify] FAIL — altered or invented quotes present.")
+        return 1
+    if strict and result.order_breaks:
+        print("[verify] FAIL (strict) — quotes verbatim but out of source order.")
+        return 1
+    if result.order_breaks:
+        print(f"[verify] PASS — every kept quote is a copied quote "
+              f"({len(result.order_breaks)} locally out of order; --strict to enforce).")
         return 0
-    print("[verify] FAIL")
-    return 1
+    print("[verify] PASS — every kept quote is a copied quote, in order.")
+    return 0
 
 
 if __name__ == "__main__":

@@ -5,8 +5,10 @@
 A local pipeline for making long RP chat logs tolerable, durable, and searchable, using free-tier models for the unskilled labor. Three compression products, each lossy in a different dimension: the **stripped** log (mechanical noise only), the **condensed** log (beats in order, kept dialogue verbatim), and the **recall index** (FTS + vectors over the condensed text). Structured campaign state stays where it belongs — in your state tables; holystone is the texture layer underneath it.
 
 ```
-raw export ──strip──▶ *.stripped.md ──condense──▶ *.condensed.md ──verify──▶ ✓
-                                           │
+raw export ──strip──▶ *.stripped.md ──condense──▶ *.condensed.md ──verify──┐
+                                                                            │ altered quotes?
+                                       *.repaired.md ◀──repair──────────────┘
+                                           │  (verbatim by construction)
                                          embed ──▶ Postgres/Supabase
                                            │       (hs_chunks: text + tsvector + pgvector)
                                            │
@@ -17,7 +19,8 @@ raw export ──strip──▶ *.stripped.md ──condense──▶ *.condense
 
 - **strip** — deterministic, no model, stdlib only. Auto-detects the export shape: **AI Exporter** files (strips OOC + full-bracket meta) and **claude.ai** files (`# you asked` / `# claude response`, `▼` scene headers — compresses `[Tracker:]` to date+place, drops `[Inventory:]`, and *keeps* `[[OOC]]` / `*[Narrator note]*` as the deliberate-meta correction record). Both normalize curly quotes once so every downstream stage sees one canonical text, and both emit `[PLAYER]` / `[NARRATOR]` turn markers. Prose and dialogue pass through untouched.
 - **condense** — the extractive second-model pass. Beats compress; kept dialogue is copied character-for-character. The contract lives in `prompts/condenser.md`. Free chat models are safe for this job *because the contract is machine-checkable* — which is the next stage.
-- **verify** — every double-quoted span in the condensed output must string-match the source, in source order. This works whether dialogue is embedded in prose (`"..." she said`) or attributed (`**Name:** "..."`) — the quotation marks are the verbatim promise either way. Violations print with a diff against the closest source quote. Nonzero exit on failure, so it can gate a pipeline. A condensation that fails verify is corrupted, not condensed.
+- **verify** — every double-quoted span in the condensed output must string-match the source. This works whether dialogue is embedded in prose (`"..." she said`) or attributed (`**Name:** "..."`) — the quotation marks are the verbatim promise either way. Altered or invented quotes print with a diff against the closest source quote and **fail** the gate (nonzero exit). Quotes that are verbatim but *locally out of source order* are a warning by default (harmless for recall); `--strict` makes them fail too. In practice no free model copies perfectly — which is what the next stage is for.
+- **repair** — deterministic, no model. Takes verify's finding to its conclusion: each altered quote is **snapped back to its exact source span**, and quotes with no source match (fabrications) are dropped, their meaning left to the surrounding beat. The output is *verbatim by construction* — run `verify` on a `*.repaired.md` and it passes, whatever model did the condensing. This is what makes a free condenser trustworthy: you don't hope the model behaved, you mechanically fix what it got wrong.
 - **embed / recall / eval** — chunk at scene breaks, embed as `passage`, upsert; questions embed as `query`. `recall` and `eval` always show vector and full-text results side by side: the comparison is the point. pgvector earns a permanent slot only if it visibly beats FTS on your own query set.
 
 ## Quickstart
@@ -29,13 +32,15 @@ cp .env.example .env        # fill in OPENROUTER_API_KEY, DATABASE_URL, condense
 # 1. Clean (works offline, try it on the bundled sample)
 holystone strip examples/sample_raw.md -o out/
 
-# 2. Condense + verify
+# 2. Condense, verify, repair (repair makes it verbatim by construction)
 holystone condense out/sample_raw.stripped.md -o out/
-holystone verify out/sample_raw.condensed.md --source out/sample_raw.stripped.md
+holystone verify  out/sample_raw.condensed.md --source out/sample_raw.stripped.md
+holystone repair  out/sample_raw.condensed.md --source out/sample_raw.stripped.md -o out/
+holystone verify  out/sample_raw.repaired.md  --source out/sample_raw.stripped.md   # PASS
 
-# 3. Index + recall
+# 3. Index + recall (embed the repaired text)
 holystone init-db
-holystone embed out/sample_raw.condensed.md --project vault49 --session sample
+holystone embed out/sample_raw.repaired.md --project vault49 --session sample
 holystone recall "what did Mott say about the registry" --project vault49
 
 # 4. The gate: fill eval/queries.yaml with ~20 real questions, then

@@ -3,6 +3,7 @@
     holystone strip raw/*.md -o out/
     holystone condense out/session.stripped.md -o out/
     holystone verify out/session.condensed.md --source out/session.stripped.md
+    holystone repair out/session.condensed.md --source out/session.stripped.md
     holystone init-db
     holystone embed out/session.condensed.md --project vault49 --session play2
     holystone recall "what did Mott say about the registry" --project vault49
@@ -46,6 +47,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("verify", help="check the condenser's extractive contract")
     p.add_argument("condensed", type=Path)
     p.add_argument("--source", type=Path, required=True)
+    p.add_argument("--strict", action="store_true",
+                   help="also fail on quotes that are verbatim but out of source order")
+
+    p = sub.add_parser("repair", help="snap altered quotes back to verbatim source")
+    p.add_argument("condensed", type=Path)
+    p.add_argument("--source", type=Path, required=True)
+    p.add_argument("-o", "--out", type=Path, default=Path("out"))
 
     p = sub.add_parser("init-db", help="create hs_chunks table + FTS index")
 
@@ -83,7 +91,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "verify":
         from .verify import verify_files
-        return verify_files(args.condensed, args.source)
+        return verify_files(args.condensed, args.source, strict=args.strict)
+
+    if args.command == "repair":
+        from .repair import repair_file
+        repair_file(args.condensed, args.source, args.out)
+        return 0
 
     if args.command == "init-db":
         from . import db
