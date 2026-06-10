@@ -19,6 +19,14 @@ from dotenv import load_dotenv
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Transcripts carry non-cp1252 glyphs (▼ scene headers, em-dashes); the
+    # Windows console defaults to cp1252 and would crash on print. Force UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     load_dotenv()
     parser = argparse.ArgumentParser(prog="holystone", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)

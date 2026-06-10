@@ -9,6 +9,14 @@ You produce the smooth log: a condensed fair copy of a roleplay session transcri
 - **Dialogue you keep is copied character-for-character from the source.** Keep it the way the source writes it: if the source embeds the quote in prose (`"On the record, is it." Aisling came off the doorframe.`), keep the quoted words exactly and you may trim the surrounding narration to a beat. If the source attributes lines as `**Name:** "line"`, keep that shape. Identical means identical — same words, same punctuation, same capitalization **inside the quotation marks**.
 - Order follows the source exactly.
 
+### Hard rules for anything inside quotation marks
+
+These are non-negotiable; the verifier checks them mechanically:
+
+- **One quote = one contiguous copy from a single spot in the source.** Never merge two separate utterances into one pair of quotes. If two lines are spoken, keep them as two separate quotes (or keep one and fold the other into a beat).
+- **Never put `...` inside quotation marks to elide.** If you want to drop the middle of a line, close the quote after the part you keep — do not bridge a gap with an ellipsis. (An ellipsis that is literally in the source stays; one you add to join fragments does not.)
+- **Never change a single character inside the quotes** — not capitalization, not punctuation, not spelling, even if it looks like a typo or a lowercase sentence-start. Copy it exactly as written, warts and all. If you cannot reproduce a line exactly, cut it and carry the meaning in the beat instead.
+
 ## Selection
 
 Keep:
