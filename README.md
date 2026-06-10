@@ -83,6 +83,41 @@ holystone-mcp --http --host 0.0.0.0 --port 8000
 
 A recall tool the narrator never calls is dead weight: post-hoc grounding (between sessions) is more reliable than hoping for an in-play call, so lean on it there first.
 
+### Online — REST surface for a Claude artifact (claude.ai web)
+
+Claude.ai web Projects can't run a local stdio server, and a true custom connector wants OAuth. The lighter path: serve the same tools over HTTP so a **Claude artifact** (client-side JS, runs from Anthropic's origin) can `fetch` them.
+
+```bash
+HOLYSTONE_REST_TOKEN=$(openssl rand -hex 16) \
+  holystone-mcp --http --host 0.0.0.0 --port 8000
+# then expose :8000 over HTTPS — a tunnel (cloudflared/ngrok) or a deploy.
+```
+
+`--http` mounts, alongside the MCP streamable endpoint:
+
+```
+POST /rest/recall        {"project":"marauders","query":"...","k":4}  -> {"ok":true,"result":"..."}
+POST /rest/find_quote    {"project":"marauders","phrase":"...","k":5}
+POST /rest/list_sessions {"project":"marauders"}
+GET  /health
+```
+
+Every POST needs `Authorization: Bearer $HOLYSTONE_REST_TOKEN` (CORS is open so the artifact can reach it; the token is what protects the data). `artifacts/recall.html` is a ready-made console for this surface — open it in a browser or paste it into a claude.ai HTML artifact, set the URL/token/project once, and search. (This mirrors the narrator-state tracker's `api.ts` connected-mode client, so one artifact pattern serves both.)
+
+> The artifact route means *the artifact* calls recall, not the model itself. Great for a search box or for pre-loading voice anchors the model then reads; for the model to call recall mid-prose on its own, use stdio (Desktop/Code) or a real OAuth connector.
+
+### One endpoint for state *and* recall
+
+If you already run a narrator-state (or other) FastMCP server, mount holystone's recall tools onto it instead of running a second process — one URL, one token:
+
+```python
+# in your narrator-state launcher, before mcp.run(...)
+from holystone.mcp_server import register as register_recall
+register_recall(server.mcp)          # adds recall / find_quote / list_sessions
+```
+
+`register(mcp)` attaches the three tools to any FastMCP instance; they reach the same `DATABASE_URL` corpus. Your existing REST patch then exposes them at `/rest/recall` automatically.
+
 ## Environment
 
 | Variable | Purpose |

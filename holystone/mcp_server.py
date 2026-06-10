@@ -91,70 +91,93 @@ def _render(hits: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-@mcp.tool()
-def recall(query: str, project: str, k: int = 4) -> str:
-    """Find past scenes or dialogue by meaning OR exact words.
+def register(server: "FastMCP") -> "FastMCP":
+    """Attach holystone's recall tools to a FastMCP instance.
 
-    Use this to re-ground a character's voice on their real past lines
-    before writing them, or to locate what was actually said or established
-    about someone or something. Returns verbatim chunks from the condensed,
-    fidelity-checked log.
+    Called on holystone's own server below, but also importable so the same
+    tools can be mounted on another campaign server (e.g. an existing
+    narrator-state server) — one endpoint then serves state AND recall:
 
-    query: what you're looking for, in natural language or keywords.
-    project: the campaign id the log was embedded under (e.g. "marauders").
-    k: how many chunks to return per method (default 4).
+        from holystone.mcp_server import register as register_recall
+        register_recall(narrator_state.mcp)
     """
-    with _quiet():
-        data = corpus.search(query, project, k=k)
-    hits = _merge(data)
-    if not hits:
-        return f"No matches for {query!r} in project {project!r}."
-    return _render(hits)
+
+    @server.tool()
+    def recall(query: str, project: str, k: int = 4) -> str:
+        """Find past scenes or dialogue by meaning OR exact words.
+
+        Use this to re-ground a character's voice on their real past lines
+        before writing them, or to locate what was actually said or
+        established about someone or something. Returns verbatim chunks from
+        the condensed, fidelity-checked log.
+
+        query: what you're looking for, in natural language or keywords.
+        project: the campaign id the log was embedded under (e.g. "marauders").
+        k: how many chunks to return per method (default 4).
+        """
+        with _quiet():
+            data = corpus.search(query, project, k=k)
+        hits = _merge(data)
+        if not hits:
+            return f"No matches for {query!r} in project {project!r}."
+        return _render(hits)
+
+    @server.tool()
+    def find_quote(phrase: str, project: str, k: int = 5) -> str:
+        """Find the exact scene where a phrase or proper noun appears.
+
+        Full-text search only — the precise instrument for exact quotes and
+        names ("what did she call her brother"). Returns verbatim log chunks.
+        """
+        with _quiet():
+            data = corpus.search(phrase, project, k=k, semantic=False, lexical=True)
+        hits = _merge(data)
+        if not hits:
+            return f"No exact match for {phrase!r} in project {project!r}."
+        return _render(hits)
+
+    @server.tool()
+    def list_sessions(project: str) -> str:
+        """List the indexed sessions for a project, with chunk counts and the
+        in-fiction date range of each — so you know what's available."""
+        with _quiet(), db.connect() as conn:
+            rows = db.list_sessions(conn, project)
+        if not rows:
+            return f"No sessions indexed for project {project!r}."
+        lines = [f"Project {project!r} — {len(rows)} session(s):"]
+        for r in rows:
+            span = ""
+            if r["date_from"] or r["date_to"]:
+                span = f"  [{r['date_from']} … {r['date_to']}]"
+            lines.append(f"  - {r['session']}: {r['chunks']} chunks{span}")
+        return "\n".join(lines)
+
+    return server
 
 
-@mcp.tool()
-def find_quote(phrase: str, project: str, k: int = 5) -> str:
-    """Find the exact scene where a phrase or proper noun appears.
-
-    Full-text search only — the precise instrument for exact quotes and
-    names ("what did she call her brother"). Returns verbatim log chunks.
-    """
-    with _quiet():
-        data = corpus.search(phrase, project, k=k, semantic=False, lexical=True)
-    hits = _merge(data)
-    if not hits:
-        return f"No exact match for {phrase!r} in project {project!r}."
-    return _render(hits)
-
-
-@mcp.tool()
-def list_sessions(project: str) -> str:
-    """List the indexed sessions for a project, with chunk counts and the
-    in-fiction date range of each — so you know what's available to recall."""
-    with _quiet(), db.connect() as conn:
-        rows = db.list_sessions(conn, project)
-    if not rows:
-        return f"No sessions indexed for project {project!r}."
-    lines = [f"Project {project!r} — {len(rows)} session(s):"]
-    for r in rows:
-        span = ""
-        if r["date_from"] or r["date_to"]:
-            span = f"  [{r['date_from']} … {r['date_to']}]"
-        lines.append(f"  - {r['session']}: {r['chunks']} chunks{span}")
-    return "\n".join(lines)
+register(mcp)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="holystone-mcp", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--http", action="store_true",
-                    help="serve over streamable HTTP (for a remote custom connector) "
-                         "instead of stdio")
+                    help="serve over streamable HTTP (remote connector / artifact) "
+                         "instead of stdio; also mounts the /rest surface")
+    ap.add_argument("--no-rest", action="store_true",
+                    help="with --http, skip the /rest + /health artifact surface")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args()
 
     if args.http:
+        if not args.no_rest:
+            from . import rest_patch
+            names = rest_patch.apply(mcp)
+            authed = bool(__import__("os").environ.get("HOLYSTONE_REST_TOKEN", "").strip())
+            print(f"[rest] POST /rest/{{{','.join(names)}}} + GET /health "
+                  f"(auth: {'token' if authed else 'OPEN — set HOLYSTONE_REST_TOKEN'})",
+                  file=sys.stderr)
         mcp.settings.host = args.host
         mcp.settings.port = args.port
         mcp.run(transport="streamable-http")

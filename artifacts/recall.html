@@ -1,0 +1,185 @@
+<!doctype html>
+<!--
+  holystone recall — a self-contained console for the /rest surface.
+
+  Use it two ways:
+    1. Open this file directly in a browser, or
+    2. Paste its contents into a claude.ai HTML artifact so you can search
+       the corpus from inside a Project chat.
+
+  It talks to a holystone server started with:
+       HOLYSTONE_REST_TOKEN=... holystone-mcp --http --host 0.0.0.0 --port 8000
+  exposed over HTTPS (a tunnel or a deploy). Settings persist in localStorage.
+  Mirrors the narrator-state tracker's api.ts client: POST {url}/rest/{tool}
+  with Authorization: Bearer <token> and a JSON body {project, ...}.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>holystone recall</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.5 system-ui, sans-serif;
+    background: #14171c; color: #e6e8eb; padding: 16px;
+  }
+  h1 { font-size: 16px; margin: 0 0 12px; letter-spacing: .02em; }
+  h1 small { color: #8b929c; font-weight: 400; }
+  .panel { background: #1b1f26; border: 1px solid #2a2f38; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+  label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: #8b929c; margin: 0 0 3px; }
+  input, select, button, textarea { font: inherit; }
+  input, select {
+    width: 100%; padding: 8px 10px; background: #11141a; color: #e6e8eb;
+    border: 1px solid #2a2f38; border-radius: 7px; outline: none;
+  }
+  input:focus, select:focus { border-color: #5b8def; }
+  .row { display: grid; gap: 8px; }
+  .settings { grid-template-columns: 2fr 1.4fr 1fr; }
+  .search { grid-template-columns: 1fr 150px 70px 96px; align-items: end; }
+  button {
+    padding: 8px 14px; background: #5b8def; color: #fff; border: 0;
+    border-radius: 7px; cursor: pointer; font-weight: 600;
+  }
+  button.ghost { background: #2a2f38; color: #cfd3da; }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { font-size: 13px; color: #8b929c; margin: 6px 2px; min-height: 18px; }
+  .status.err { color: #ff7a7a; }
+  .card { background: #1b1f26; border: 1px solid #2a2f38; border-left: 3px solid #5b8def; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+  .card .meta { font-size: 11px; color: #7f93c8; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+  .card pre { margin: 0; white-space: pre-wrap; word-wrap: break-word; font: inherit; }
+  details summary { cursor: pointer; color: #8b929c; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>holystone&nbsp;recall <small>— search the verbatim log</small></h1>
+
+  <details class="panel" id="settingsPanel">
+    <summary>Connection settings</summary>
+    <div class="row settings" style="margin-top:10px">
+      <div><label>Server URL</label><input id="serverUrl" placeholder="https://your-tunnel.example/" /></div>
+      <div><label>Bearer token</label><input id="token" type="password" placeholder="HOLYSTONE_REST_TOKEN" /></div>
+      <div><label>Project</label><input id="project" placeholder="marauders" /></div>
+    </div>
+    <div style="margin-top:10px; display:flex; gap:8px; align-items:center">
+      <button class="ghost" id="saveBtn">Save</button>
+      <button class="ghost" id="healthBtn">Test /health</button>
+      <span class="status" id="healthStatus"></span>
+    </div>
+  </details>
+
+  <div class="panel">
+    <div class="row search">
+      <div><label>Query</label><input id="query" placeholder="how does McGonagall give orders" /></div>
+      <div>
+        <label>Mode</label>
+        <select id="mode">
+          <option value="recall">Semantic + lexical</option>
+          <option value="find_quote">Exact phrase</option>
+        </select>
+      </div>
+      <div><label>k</label><input id="k" type="number" value="4" min="1" max="20" /></div>
+      <div><button id="searchBtn">Search</button></div>
+    </div>
+  </div>
+
+  <div class="status" id="status"></div>
+  <div id="results"></div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const KEYS = ["serverUrl", "token", "project"];
+  const store = {
+    load() { try { return JSON.parse(localStorage.getItem("holystone-recall") || "{}"); } catch { return {}; } },
+    save(o) { try { localStorage.setItem("holystone-recall", JSON.stringify(o)); } catch {} },
+  };
+
+  // Restore settings
+  const saved = store.load();
+  KEYS.forEach((k) => { if (saved[k]) $(k).value = saved[k]; });
+  if (!saved.serverUrl) $("settingsPanel").open = true;
+
+  function settings() {
+    return { serverUrl: $("serverUrl").value.trim().replace(/\/+$/, ""), token: $("token").value.trim(), project: $("project").value.trim() };
+  }
+  function headers(s) {
+    const h = { "Content-Type": "application/json" };
+    if (s.token) h["Authorization"] = "Bearer " + s.token;
+    return h;
+  }
+
+  $("saveBtn").onclick = () => {
+    const s = settings(); store.save(s);
+    $("healthStatus").textContent = "saved.";
+    $("healthStatus").className = "status";
+  };
+
+  $("healthBtn").onclick = async () => {
+    const s = settings();
+    if (!s.serverUrl) { $("healthStatus").textContent = "set a server URL first"; $("healthStatus").className = "status err"; return; }
+    $("healthStatus").textContent = "checking…"; $("healthStatus").className = "status";
+    try {
+      const r = await fetch(s.serverUrl + "/health", { headers: s.token ? { Authorization: "Bearer " + s.token } : {} });
+      const j = await r.json();
+      $("healthStatus").textContent = `ok — tools: ${(j.tools || []).join(", ")} · auth: ${j.auth ? "on" : "OPEN"}`;
+      $("healthStatus").className = "status";
+    } catch (e) {
+      $("healthStatus").textContent = "unreachable: " + e.message; $("healthStatus").className = "status err";
+    }
+  };
+
+  function render(text) {
+    const results = $("results");
+    results.innerHTML = "";
+    // The tool returns one string; cards are separated by lines starting "### ".
+    const blocks = text.split(/\n(?=### )/);
+    for (const b of blocks) {
+      const card = document.createElement("div");
+      card.className = "card";
+      const m = b.match(/^### (.*)/);
+      if (m) {
+        const meta = document.createElement("div");
+        meta.className = "meta"; meta.textContent = m[1];
+        card.appendChild(meta);
+      }
+      const pre = document.createElement("pre");
+      pre.textContent = b.replace(/^### .*\n?/, "");
+      card.appendChild(pre);
+      results.appendChild(card);
+    }
+  }
+
+  $("searchBtn").onclick = async () => {
+    const s = settings(); store.save(s);
+    const q = $("query").value.trim();
+    const mode = $("mode").value;
+    const k = parseInt($("k").value, 10) || 4;
+    if (!s.serverUrl) { $("status").textContent = "set a server URL in settings"; $("status").className = "status err"; return; }
+    if (!s.project) { $("status").textContent = "set a project in settings"; $("status").className = "status err"; return; }
+    if (!q) { $("status").textContent = "type a query"; $("status").className = "status err"; return; }
+
+    const body = mode === "find_quote"
+      ? { project: s.project, phrase: q, k }
+      : { project: s.project, query: q, k };
+
+    $("status").textContent = "searching…"; $("status").className = "status";
+    $("searchBtn").disabled = true; $("results").innerHTML = "";
+    try {
+      const r = await fetch(s.serverUrl + "/rest/" + mode, { method: "POST", headers: headers(s), body: JSON.stringify(body) });
+      const j = await r.json();
+      if (!j.ok) { $("status").textContent = "error: " + (j.error || r.status); $("status").className = "status err"; }
+      else { $("status").textContent = "done."; $("status").className = "status"; render(j.result || "(empty)"); }
+    } catch (e) {
+      $("status").textContent = "request failed: " + e.message + " (CORS? wrong URL? token?)"; $("status").className = "status err";
+    } finally {
+      $("searchBtn").disabled = false;
+    }
+  };
+
+  $("query").addEventListener("keydown", (e) => { if (e.key === "Enter") $("searchBtn").click(); });
+})();
+</script>
+</body>
+</html>
